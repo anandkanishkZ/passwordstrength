@@ -38,9 +38,9 @@ export function CaptchaWidget({ value, onChange, onChallengeChange, error }: Cap
 
   return (
     <div className="space-y-2">
-      <label className="flex items-center gap-2 font-mono text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-        <ShieldQuestion size={13} className="text-primary" />
-        CAPTCHA Verification
+      <label className="flex items-center gap-2 text-sm font-medium text-foreground">
+        <ShieldQuestion size={15} className="text-primary shrink-0" aria-hidden />
+        CAPTCHA verification
       </label>
 
       <div className="flex items-center gap-3">
@@ -64,7 +64,7 @@ export function CaptchaWidget({ value, onChange, onChallengeChange, error }: Cap
             size={13}
             className="transition-transform group-hover:rotate-180 duration-300"
           />
-          <span className="font-mono">New</span>
+          <span className="text-xs font-medium">New challenge</span>
         </button>
       </div>
 
@@ -72,7 +72,7 @@ export function CaptchaWidget({ value, onChange, onChallengeChange, error }: Cap
       <input
         type="text"
         inputMode="numeric"
-        pattern="[0-9-]*"
+        pattern="[0-9\-]*"
         value={value}
         onChange={(e) => {
           // SECURITY: Only allow numeric input (including negative for subtraction results)
@@ -81,9 +81,7 @@ export function CaptchaWidget({ value, onChange, onChallengeChange, error }: Cap
         }}
         placeholder="Enter your answer"
         maxLength={5}
-        className={`input-cyber w-full rounded-lg px-4 py-2.5 text-sm placeholder:text-muted-foreground ${
-          error ? "border-[hsl(var(--destructive))]" : ""
-        }`}
+        className={`input-enterprise ${error ? "input-enterprise-error" : ""}`}
         aria-label="CAPTCHA answer"
         autoComplete="off"
       />
