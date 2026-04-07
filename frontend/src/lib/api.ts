@@ -100,6 +100,10 @@ export async function requestLogout() {
   return apiPost("/api/auth/logout", {});
 }
 
+export async function fetchAdminUsers() {
+  return apiGet("/api/admin/users");
+}
+
 export async function changePassword(currentPassword: string, newPassword: string) {
   return apiPost("/api/auth/change-password", { currentPassword, newPassword });
 }

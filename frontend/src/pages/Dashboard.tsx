@@ -33,6 +33,7 @@ export interface SessionUser {
   email: string;
   username: string | null;
   mfa_enabled: boolean;
+  is_admin?: boolean;
   password_changed_at?: string;
   password_age_days?: number;
   password_max_age_days?: number;
@@ -170,6 +171,13 @@ const Dashboard = () => {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {user.is_admin && (
+              <Button variant="outline" size="sm" asChild>
+                <Link to="/admin">
+                  Admin Panel
+                </Link>
+              </Button>
+            )}
             <Button variant="outline" size="sm" asChild>
               <Link to="/">
                 Home

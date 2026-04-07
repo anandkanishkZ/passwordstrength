@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS users (
   last_jwt_invalidated_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  password_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  password_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  is_admin BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -101,6 +102,11 @@ async function migrateUsersColumns() {
   } catch {
     /* already NOT NULL or empty table edge case */
   }
+
+  // Add is_admin column
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
 }
 
 const app = express();
@@ -177,6 +183,15 @@ async function ensureAuthenticated(req: AuthenticatedRequest, res: Response, nex
   }
 
   req.user = { id: decoded.sub, email: decoded.email, mfa: decoded.mfa };
+  next();
+}
+
+async function ensureAdmin(req: AuthenticatedRequest, res: Response, next: () => void) {
+  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+  const userResult = await pool.query("SELECT is_admin FROM users WHERE id=$1", [req.user.id]);
+  if (userResult.rowCount === 0 || !userResult.rows[0].is_admin) {
+    return res.status(403).json({ error: "Admin access required" });
+  }
   next();
 }
 
@@ -346,9 +361,13 @@ app.post("/api/auth/register", async (req: Request, res: Response) => {
 
   const id = uuidv4();
 
+  // Check if this is the first user, make them admin
+  const userCount = await pool.query("SELECT COUNT(*) as count FROM users");
+  const isFirstUser = parseInt(userCount.rows[0].count) === 0;
+
   await pool.query(
-    "INSERT INTO users (id, email, username, password_hash, password_history, last_jwt_invalidated_at, password_changed_at) VALUES ($1,$2,$3,$4,$5,$6, NOW())",
-    [id, email, username || null, hashed, JSON.stringify([hashed]), new Date()]
+    "INSERT INTO users (id, email, username, password_hash, password_history, last_jwt_invalidated_at, password_changed_at, is_admin) VALUES ($1,$2,$3,$4,$5,$6, NOW(), $7)",
+    [id, email, username || null, hashed, JSON.stringify([hashed]), new Date(), isFirstUser]
   );
 
   const token = generateJwt({ id, email, mfaEnabled: false });
@@ -656,7 +675,7 @@ app.post("/api/auth/logout", async (req: Request, res: Response) => {
 app.get("/api/auth/me", ensureAuthenticated, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) return res.status(401).json({ error: "Unauthorized" });
   const user = await pool.query(
-    "SELECT id,email,username,mfa_enabled,password_changed_at,failed_login_attempts,lockout_until FROM users WHERE id=$1",
+    "SELECT id,email,username,mfa_enabled,password_changed_at,failed_login_attempts,lockout_until,is_admin FROM users WHERE id=$1",
     [req.user.id]
   );
   if (user.rowCount === 0) return res.status(404).json({ error: "User not found" });
@@ -672,6 +691,7 @@ app.get("/api/auth/me", ensureAuthenticated, async (req: AuthenticatedRequest, r
       email: row.email,
       username: row.username,
       mfa_enabled: row.mfa_enabled,
+      is_admin: row.is_admin,
       password_changed_at: row.password_changed_at,
       password_age_days: passwordAgeDays,
       password_max_age_days: PASSWORD_MAX_AGE_DAYS,
@@ -683,6 +703,13 @@ app.get("/api/auth/me", ensureAuthenticated, async (req: AuthenticatedRequest, r
       lockout_minutes: LOCKOUT_DURATION_MINUTES,
     },
   });
+});
+
+app.get("/api/admin/users", ensureAuthenticated, ensureAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  const users = await pool.query(
+    "SELECT id,email,username,mfa_enabled,created_at,updated_at,is_admin FROM users ORDER BY created_at DESC"
+  );
+  res.json({ users: users.rows });
 });
 
 app.listen(4000, async () => {
