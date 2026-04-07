@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Lock, Mail, Eye, EyeOff, ShieldCheck, AlertCircle } from "lucide-react";
-import { loginUserRemote, verifyMfa, setStoredToken } from "@/lib/api";
+import { loginUserRemote, loginVerifyOtpRemote, verifyMfa, setStoredToken } from "@/lib/api";
 import { executeRecaptcha, isRecaptchaConfigured } from "@/lib/recaptcha";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -34,6 +34,9 @@ export function LoginForm() {
   const [mfaCode, setMfaCode] = useState("");
   const [mfaRequired, setMfaRequired] = useState(false);
   const [userId, setUserId] = useState("");
+  const [otpRequired, setOtpRequired] = useState(false);
+  const [otpChallengeId, setOtpChallengeId] = useState("");
+  const [otpCode, setOtpCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -66,10 +69,31 @@ export function LoginForm() {
 
     try {
       const res = await loginUserRemote(email, password, captchaToken);
+      if (res.challengeId && typeof res.challengeId === "string") {
+        setOtpRequired(true);
+        setOtpChallengeId(res.challengeId);
+        setMessage({ type: "success", text: res.message || "OTP sent to your Gmail. Enter it below." });
+        return;
+      }
+      setMessage({ type: "error", text: "Sign-in did not start OTP verification." });
+    } catch (err: unknown) {
+      setMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Sign-in failed.",
+      });
+    }
+  };
+
+  const verifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMessage(null);
+    try {
+      const res = await loginVerifyOtpRemote(otpChallengeId, otpCode);
       if (res.mfa_required) {
+        setOtpRequired(false);
         setMfaRequired(true);
         setUserId(res.userId);
-        setMessage({ type: "success", text: "Enter the code from your authenticator app." });
+        setMessage({ type: "success", text: "OTP verified. Enter authenticator app code." });
         return;
       }
       if (res.token && typeof res.token === "string") {
@@ -77,11 +101,11 @@ export function LoginForm() {
         goDashboard();
         return;
       }
-      setMessage({ type: "error", text: "Sign-in did not return a session token." });
+      setMessage({ type: "error", text: "OTP verification did not return a session token." });
     } catch (err: unknown) {
       setMessage({
         type: "error",
-        text: err instanceof Error ? err.message : "Sign-in failed.",
+        text: err instanceof Error ? err.message : "OTP verification failed.",
       });
     }
   };
@@ -126,6 +150,34 @@ export function LoginForm() {
           />
           <Button type="submit" className="w-full">
             Verify and continue
+          </Button>
+        </form>
+      </div>
+    );
+  }
+
+  if (otpRequired) {
+    return (
+      <div className="space-y-4">
+        <div>
+          <h2 className="text-base font-semibold text-foreground">Email OTP verification</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Enter the 6-digit OTP sent to your registered Gmail.</p>
+        </div>
+        {message && <MessageBanner type={message.type}>{message.text}</MessageBanner>}
+        <form onSubmit={verifyOtp} className="space-y-3">
+          <label className="block text-sm font-medium text-foreground">OTP code</label>
+          <input
+            type="text"
+            className="input-enterprise font-mono"
+            value={otpCode}
+            onChange={(e) => setOtpCode(e.target.value)}
+            placeholder="000000"
+            maxLength={6}
+            required
+            autoComplete="one-time-code"
+          />
+          <Button type="submit" className="w-full">
+            Verify OTP
           </Button>
         </form>
       </div>

@@ -6,24 +6,30 @@
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Eye, EyeOff, User, Lock, ShieldCheck, AlertCircle, Loader2 } from "lucide-react";
+import { Eye, EyeOff, User, Lock, ShieldCheck, AlertCircle, Loader2, Mail } from "lucide-react";
 import { evaluatePasswordStrength, StrengthResult } from "@/lib/passwordStrength";
 import { validateUsername, validatePassword, validatePasswordMatch, sanitiseInput } from "@/lib/inputValidation";
-import { registerUserRemote, setStoredToken } from "@/lib/api";
+import { registerRequestOtpRemote, registerVerifyOtpRemote, setStoredToken } from "@/lib/api";
 import { executeRecaptcha, isRecaptchaConfigured } from "@/lib/recaptcha";
 import { PasswordStrengthMeter } from "./PasswordStrengthMeter";
 import { Button } from "@/components/ui/button";
 
 interface FormState {
+  email: string;
+  gmail: string;
   username: string;
   password: string;
   confirmPassword: string;
+  otp: string;
 }
 
 interface FormErrors {
+  email?: string;
+  gmail?: string;
   username?: string;
   password?: string;
   confirmPassword?: string;
+  otp?: string;
 }
 
 type SubmissionResult =
@@ -34,9 +40,12 @@ type SubmissionResult =
 export function RegistrationForm() {
   const navigate = useNavigate();
   const [form, setForm] = useState<FormState>({
+    email: "",
+    gmail: "",
     username: "",
     password: "",
     confirmPassword: "",
+    otp: "",
   });
 
   const [errors, setErrors] = useState<FormErrors>({});
@@ -45,6 +54,7 @@ export function RegistrationForm() {
   const [strengthResult, setStrengthResult] = useState<StrengthResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState<SubmissionResult>(null);
+  const [challengeId, setChallengeId] = useState<string | null>(null);
 
   const updateField = (field: keyof FormState, value: string) => {
     const sanitised =
@@ -79,6 +89,8 @@ export function RegistrationForm() {
     const confirmCheck = validatePasswordMatch(form.password, form.confirmPassword);
 
     const newErrors: FormErrors = {};
+    if (!form.email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) newErrors.email = "Enter a valid email.";
+    if (!form.gmail.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.gmail)) newErrors.gmail = "Enter a valid Gmail.";
     if (!usernameCheck.valid) newErrors.username = usernameCheck.error;
     if (!passwordCheck.valid) newErrors.password = passwordCheck.error;
     if (!confirmCheck.valid) newErrors.confirmPassword = confirmCheck.error;
@@ -114,25 +126,46 @@ export function RegistrationForm() {
     }
 
     try {
-      const email = `${form.username.toLowerCase().trim()}@example.com`;
-      const registrationResult = await registerUserRemote(email, form.password, form.username, captchaToken);
+      const registrationResult = await registerRequestOtpRemote(
+        form.email.trim().toLowerCase(),
+        form.gmail.trim().toLowerCase(),
+        form.password,
+        form.username,
+        captchaToken
+      );
+      setChallengeId(registrationResult.challengeId);
+      setResult({
+        status: "success",
+        message: registrationResult.message || "OTP sent. Verify to complete registration.",
+        hashPreview: "",
+      });
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Registration failed. Please try again.";
+      setResult({ status: "error", message: msg });
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
+  const handleVerifyOtp = async () => {
+    if (!challengeId) return;
+    if (!/^\d{6}$/.test(form.otp)) {
+      setErrors((prev) => ({ ...prev, otp: "Enter a 6-digit OTP." }));
+      return;
+    }
+    setIsLoading(true);
+    setResult(null);
+    try {
+      const registrationResult = await registerVerifyOtpRemote(challengeId, form.otp);
       if (registrationResult.token && typeof registrationResult.token === "string") {
         setStoredToken(registrationResult.token);
         navigate("/dashboard", { replace: true });
         return;
       }
-
-      setResult({
-        status: "success",
-        message: registrationResult.message || "Registered successfully",
-        hashPreview: "",
-      });
-      setForm({ username: "", password: "", confirmPassword: "" });
-      setStrengthResult(null);
+      setResult({ status: "error", message: "Verification did not return a session token." });
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : "Registration failed. Please try again.";
+      const msg = err instanceof Error ? err.message : "OTP verification failed.";
       setResult({ status: "error", message: msg });
     } finally {
       setIsLoading(false);
@@ -174,6 +207,44 @@ export function RegistrationForm() {
           </div>
         </div>
       )}
+
+      <div className="space-y-1.5">
+        <label htmlFor="email" className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <Mail size={15} className="text-primary shrink-0" aria-hidden />
+          Email
+        </label>
+        <input
+          id="email"
+          type="email"
+          value={form.email}
+          onChange={(e) => updateField("email", e.target.value)}
+          placeholder="you@company.com"
+          autoComplete="email"
+          aria-describedby={errors.email ? "email-error" : undefined}
+          aria-invalid={!!errors.email}
+          className={`input-enterprise ${errors.email ? "input-enterprise-error" : ""}`}
+        />
+        {errors.email && <p id="email-error" role="alert" className="font-mono text-xs text-[hsl(var(--destructive))]">{errors.email}</p>}
+      </div>
+
+      <div className="space-y-1.5">
+        <label htmlFor="gmail" className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <Mail size={15} className="text-primary shrink-0" aria-hidden />
+          Gmail (for OTP)
+        </label>
+        <input
+          id="gmail"
+          type="email"
+          value={form.gmail}
+          onChange={(e) => updateField("gmail", e.target.value)}
+          placeholder="yourname@gmail.com"
+          autoComplete="email"
+          aria-describedby={errors.gmail ? "gmail-error" : undefined}
+          aria-invalid={!!errors.gmail}
+          className={`input-enterprise ${errors.gmail ? "input-enterprise-error" : ""}`}
+        />
+        {errors.gmail && <p id="gmail-error" role="alert" className="font-mono text-xs text-[hsl(var(--destructive))]">{errors.gmail}</p>}
+      </div>
 
       <div className="space-y-1.5">
         <label htmlFor="username" className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -298,7 +369,7 @@ export function RegistrationForm() {
         checkbox. If the script loaded, you will see the small reCAPTCHA badge in the corner of the page.
       </p>
 
-      <Button type="submit" disabled={isLoading} className="w-full" size="lg" aria-label="Submit registration form">
+      <Button type="submit" disabled={isLoading || !!challengeId} className="w-full" size="lg" aria-label="Submit registration form">
         {isLoading ? (
           <>
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -311,6 +382,28 @@ export function RegistrationForm() {
           </>
         )}
       </Button>
+
+      {challengeId && (
+        <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+          <label htmlFor="register-otp" className="text-sm font-medium text-foreground">
+            Enter OTP sent to your Gmail
+          </label>
+          <input
+            id="register-otp"
+            type="text"
+            value={form.otp}
+            onChange={(e) => updateField("otp", e.target.value)}
+            placeholder="6-digit OTP"
+            maxLength={6}
+            className={`input-enterprise font-mono ${errors.otp ? "input-enterprise-error" : ""}`}
+            autoComplete="one-time-code"
+          />
+          {errors.otp && <p role="alert" className="font-mono text-xs text-[hsl(var(--destructive))]">{errors.otp}</p>}
+          <Button type="button" onClick={handleVerifyOtp} disabled={isLoading} className="w-full">
+            Verify OTP and continue
+          </Button>
+        </div>
+      )}
 
       <p className="flex items-center justify-center gap-2 text-center text-[11px] text-muted-foreground">
         <ShieldCheck size={12} className="text-primary shrink-0" aria-hidden />

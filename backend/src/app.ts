@@ -6,6 +6,7 @@ import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
 import { Pool } from "pg";
 import bcrypt from "bcryptjs";
+import nodemailer from "nodemailer";
 import { sign, verify, decode, Secret, SignOptions } from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
 import speakeasy from "speakeasy";
@@ -26,6 +27,10 @@ const {
   RECAPTCHA_SKIP_VERIFY,
   TRUST_PROXY,
   FRONTEND_URL = "http://localhost:5173",
+  GMAIL_USER,
+  GMAIL_APP_PASSWORD,
+  OTP_EXPIRES_MINUTES = "10",
+  OTP_MAX_ATTEMPTS = "5",
 } = process.env;
 
 const ALLOWED_ORIGINS = FRONTEND_URL.split(",")
@@ -40,6 +45,8 @@ const MAX_FAILED_LOGIN_ATTEMPTS = Math.max(1, Number.parseInt(process.env.MAX_FA
 const LOCKOUT_DURATION_MINUTES = Math.max(1, Number.parseInt(process.env.LOCKOUT_DURATION_MINUTES || "15", 10) || 15);
 /** Recommend password change when older than this many days. */
 const PASSWORD_MAX_AGE_DAYS = Math.max(1, Number.parseInt(process.env.PASSWORD_MAX_AGE_DAYS || "30", 10) || 30);
+const OTP_EXPIRY_MINUTES = Math.max(1, Number.parseInt(OTP_EXPIRES_MINUTES, 10) || 10);
+const OTP_ALLOWED_ATTEMPTS = Math.max(1, Number.parseInt(OTP_MAX_ATTEMPTS, 10) || 5);
 
 if (!DATABASE_URL) {
   throw new Error("DATABASE_URL is required in .env");
@@ -52,6 +59,7 @@ async function initSchema() {
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY,
   email TEXT UNIQUE NOT NULL,
+  gmail TEXT UNIQUE,
   username TEXT,
   password_hash TEXT NOT NULL,
   password_history JSONB NOT NULL DEFAULT '[]',
@@ -82,6 +90,20 @@ CREATE TABLE IF NOT EXISTS recovery_codes (
   used_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS otp_challenges (
+  id UUID PRIMARY KEY,
+  purpose TEXT NOT NULL,
+  target_email TEXT NOT NULL,
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  otp_hash TEXT NOT NULL,
+  payload JSONB,
+  attempts INT NOT NULL DEFAULT 0,
+  max_attempts INT NOT NULL DEFAULT 5,
+  expires_at TIMESTAMPTZ NOT NULL,
+  consumed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
   `);
 }
 
@@ -107,6 +129,12 @@ async function migrateUsersColumns() {
   await pool.query(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
   `);
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS gmail TEXT;
+  `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS users_gmail_unique_idx ON users (gmail) WHERE gmail IS NOT NULL;
+  `);
 
   // Backfill legacy databases: ensure there is at least one admin user.
   const adminCountResult = await pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE is_admin = TRUE;`);
@@ -124,6 +152,14 @@ async function migrateUsersColumns() {
     `);
   }
 }
+
+const mailer =
+  GMAIL_USER && GMAIL_APP_PASSWORD
+    ? nodemailer.createTransport({
+        service: "gmail",
+        auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
+      })
+    : null;
 
 const app = express();
 if (TRUST_PROXY === "1" || TRUST_PROXY === "true") {
@@ -344,9 +380,67 @@ function generateRecoveryCodes(count: number = 10): string[] {
   return codes;
 }
 
-app.post("/api/auth/register", async (req: Request, res: Response) => {
+function generateOtpCode(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+async function sendOtpEmail(targetEmail: string, otpCode: string, purpose: "register" | "login") {
+  if (!mailer || !GMAIL_USER) {
+    throw new Error("Email service is not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD in backend .env");
+  }
+  const subject = purpose === "register" ? "Your account verification OTP" : "Your sign-in OTP";
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height:1.5;">
+      <h2 style="margin-bottom:8px;">Secure Guardian Gate</h2>
+      <p>Your one-time password is:</p>
+      <p style="font-size:28px;font-weight:700;letter-spacing:4px;margin:10px 0;">${otpCode}</p>
+      <p>This code expires in ${OTP_EXPIRY_MINUTES} minutes.</p>
+      <p>If you did not request this, you can ignore this email.</p>
+    </div>
+  `;
+  await mailer.sendMail({
+    from: `"Secure Guardian Gate" <${GMAIL_USER}>`,
+    to: targetEmail,
+    subject,
+    html,
+    text: `Your OTP is ${otpCode}. It expires in ${OTP_EXPIRY_MINUTES} minutes.`,
+  });
+}
+
+async function createOtpChallenge(params: {
+  purpose: "register" | "login";
+  targetEmail: string;
+  userId?: string;
+  payload?: Record<string, unknown>;
+}) {
+  const id = uuidv4();
+  const otp = generateOtpCode();
+  const otpHash = await bcrypt.hash(otp, 10);
+  const expiresAt = minutesFromNow(OTP_EXPIRY_MINUTES);
+
+  await pool.query(
+    `INSERT INTO otp_challenges
+    (id, purpose, target_email, user_id, otp_hash, payload, max_attempts, expires_at)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [
+      id,
+      params.purpose,
+      params.targetEmail,
+      params.userId || null,
+      otpHash,
+      params.payload ? JSON.stringify(params.payload) : null,
+      OTP_ALLOWED_ATTEMPTS,
+      expiresAt,
+    ]
+  );
+  await sendOtpEmail(params.targetEmail, otp, params.purpose);
+  return id;
+}
+
+app.post("/api/auth/register/request-otp", async (req: Request, res: Response) => {
   const schema = z.object({
     email: z.string().email(),
+    gmail: z.string().email(),
     password: z.string(),
     username: z.string().optional(),
     captchaToken: z.string().min(1, "reCAPTCHA token required"),
@@ -354,7 +448,7 @@ app.post("/api/auth/register", async (req: Request, res: Response) => {
   const parse = schema.safeParse(req.body);
   if (!parse.success) return res.status(400).json({ error: parse.error.format() });
 
-  const { email, password, username, captchaToken } = parse.data;
+  const { email, gmail, password, username, captchaToken } = parse.data;
 
   const captcha = await verifyCaptcha(captchaToken, "auth", clientIp(req));
   if (!captcha.ok) {
@@ -370,21 +464,80 @@ app.post("/api/auth/register", async (req: Request, res: Response) => {
 
   const hashed = await bcrypt.hash(password, 12);
 
-  const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email]);
+  const existing = await pool.query("SELECT id FROM users WHERE email = $1 OR gmail = $2", [email, gmail]);
+  if ((existing.rowCount ?? 0) > 0) {
+    return res.status(409).json({ error: "Email already exists" });
+  }
+
+  try {
+    const challengeId = await createOtpChallenge({
+      purpose: "register",
+      targetEmail: gmail,
+      payload: { email, gmail, username: username || null, hashed },
+    });
+    res.json({
+      challengeId,
+      message: `OTP sent to ${gmail}. Enter the code to complete account creation.`,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not send OTP";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.post("/api/auth/register/verify-otp", async (req: Request, res: Response) => {
+  const schema = z.object({ challengeId: z.string().uuid(), otp: z.string().length(6) });
+  const parse = schema.safeParse(req.body);
+  if (!parse.success) return res.status(400).json({ error: parse.error.format() });
+  const { challengeId, otp } = parse.data;
+
+  const challengeResult = await pool.query(
+    "SELECT * FROM otp_challenges WHERE id=$1 AND purpose='register' AND consumed_at IS NULL",
+    [challengeId]
+  );
+  if (challengeResult.rowCount === 0) return res.status(400).json({ error: "Invalid OTP challenge" });
+  const challenge = challengeResult.rows[0];
+  if (new Date(challenge.expires_at) < new Date()) {
+    return res.status(400).json({ error: "OTP expired. Request a new one." });
+  }
+  if (challenge.attempts >= challenge.max_attempts) {
+    return res.status(400).json({ error: "OTP attempts exceeded. Request a new one." });
+  }
+
+  // Check if this is the first user, make them admin
+  const userCount = await pool.query("SELECT COUNT(*) as count FROM users");
+  const isFirstUser = parseInt(userCount.rows[0].count) === 0;
+
+  const matched = await bcrypt.compare(otp, challenge.otp_hash);
+  if (!matched) {
+    await pool.query("UPDATE otp_challenges SET attempts=attempts+1 WHERE id=$1", [challengeId]);
+    return res.status(401).json({ error: "Invalid OTP code" });
+  }
+
+  const payload = (challenge.payload ?? {}) as {
+    email?: string;
+    gmail?: string;
+    username?: string | null;
+    hashed?: string;
+  };
+  if (!payload.email || !payload.gmail || !payload.hashed) {
+    return res.status(400).json({ error: "OTP challenge payload invalid. Start registration again." });
+  }
+  const email = payload.email.toLowerCase().trim();
+  const gmail = payload.gmail.toLowerCase().trim();
+
+  const existing = await pool.query("SELECT id FROM users WHERE email=$1 OR gmail=$2", [email, gmail]);
   if ((existing.rowCount ?? 0) > 0) {
     return res.status(409).json({ error: "Email already exists" });
   }
 
   const id = uuidv4();
 
-  // Check if this is the first user, make them admin
-  const userCount = await pool.query("SELECT COUNT(*) as count FROM users");
-  const isFirstUser = parseInt(userCount.rows[0].count) === 0;
-
   await pool.query(
-    "INSERT INTO users (id, email, username, password_hash, password_history, last_jwt_invalidated_at, password_changed_at, is_admin) VALUES ($1,$2,$3,$4,$5,$6, NOW(), $7)",
-    [id, email, username || null, hashed, JSON.stringify([hashed]), new Date(), isFirstUser]
+    "INSERT INTO users (id, email, gmail, username, password_hash, password_history, last_jwt_invalidated_at, password_changed_at, is_admin) VALUES ($1,$2,$3,$4,$5,$6,$7, NOW(), $8)",
+    [id, email, gmail, payload.username || null, payload.hashed, JSON.stringify([payload.hashed]), new Date(), isFirstUser]
   );
+  await pool.query("UPDATE otp_challenges SET consumed_at=NOW() WHERE id=$1", [challengeId]);
 
   const token = generateJwt({ id, email, mfaEnabled: false });
   const refresh = generateRefreshToken(id);
@@ -395,7 +548,7 @@ app.post("/api/auth/register", async (req: Request, res: Response) => {
   res.json({ token });
 });
 
-app.post("/api/auth/login", async (req: Request, res: Response) => {
+app.post("/api/auth/login/request-otp", async (req: Request, res: Response) => {
   const schema = z.object({
     email: z.string().email(),
     password: z.string(),
@@ -450,11 +603,61 @@ app.post("/api/auth/login", async (req: Request, res: Response) => {
     return res.json({ mfa_required: true, userId: user.id });
   }
 
-  const token = generateJwt({ id: user.id, email: user.email, mfaEnabled });
+  try {
+    const challengeId = await createOtpChallenge({
+      purpose: "login",
+      targetEmail: user.gmail || user.email,
+      userId: user.id,
+      payload: { userId: user.id },
+    });
+    res.json({ challengeId, message: "OTP sent to your registered Gmail address." });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not send OTP";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.post("/api/auth/login/verify-otp", async (req: Request, res: Response) => {
+  const schema = z.object({ challengeId: z.string().uuid(), otp: z.string().length(6) });
+  const parse = schema.safeParse(req.body);
+  if (!parse.success) return res.status(400).json({ error: parse.error.format() });
+  const { challengeId, otp } = parse.data;
+
+  const challengeResult = await pool.query(
+    "SELECT * FROM otp_challenges WHERE id=$1 AND purpose='login' AND consumed_at IS NULL",
+    [challengeId]
+  );
+  if (challengeResult.rowCount === 0) return res.status(400).json({ error: "Invalid OTP challenge" });
+  const challenge = challengeResult.rows[0];
+  if (new Date(challenge.expires_at) < new Date()) {
+    return res.status(400).json({ error: "OTP expired. Request a new one." });
+  }
+  if (challenge.attempts >= challenge.max_attempts) {
+    return res.status(400).json({ error: "OTP attempts exceeded. Request a new one." });
+  }
+
+  const matched = await bcrypt.compare(otp, challenge.otp_hash);
+  if (!matched) {
+    await pool.query("UPDATE otp_challenges SET attempts=attempts+1 WHERE id=$1", [challengeId]);
+    return res.status(401).json({ error: "Invalid OTP code" });
+  }
+
+  const userId = challenge.user_id as string | null;
+  if (!userId) return res.status(400).json({ error: "OTP challenge payload invalid. Start sign-in again." });
+  const userResult = await pool.query("SELECT id,email,mfa_enabled FROM users WHERE id=$1", [userId]);
+  if (userResult.rowCount === 0) return res.status(404).json({ error: "User not found" });
+  const user = userResult.rows[0];
+
+  await pool.query("UPDATE otp_challenges SET consumed_at=NOW() WHERE id=$1", [challengeId]);
+
+  if (user.mfa_enabled) {
+    return res.json({ mfa_required: true, userId: user.id });
+  }
+
+  const token = generateJwt({ id: user.id, email: user.email, mfaEnabled: Boolean(user.mfa_enabled) });
   const refresh = generateRefreshToken(user.id);
   const refreshExpiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000);
   await pool.query("INSERT INTO refresh_tokens(token,user_id,expires_at) VALUES($1,$2,$3)", [refresh, user.id, refreshExpiresAt]);
-
   setRefreshCookie(res, refresh);
   res.json({ token });
 });

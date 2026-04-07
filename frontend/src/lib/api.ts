@@ -80,12 +80,26 @@ async function apiGet(path: string) {
   return data;
 }
 
-export async function registerUserRemote(email: string, password: string, username?: string, captchaToken?: string) {
-  return apiPost("/api/auth/register", { email, password, username, captchaToken });
+export async function registerRequestOtpRemote(
+  email: string,
+  gmail: string,
+  password: string,
+  username?: string,
+  captchaToken?: string
+) {
+  return apiPost("/api/auth/register/request-otp", { email, gmail, password, username, captchaToken });
+}
+
+export async function registerVerifyOtpRemote(challengeId: string, otp: string) {
+  return apiPost("/api/auth/register/verify-otp", { challengeId, otp });
 }
 
 export async function loginUserRemote(email: string, password: string, captchaToken?: string) {
-  return apiPost("/api/auth/login", { email, password, captchaToken });
+  return apiPost("/api/auth/login/request-otp", { email, password, captchaToken });
+}
+
+export async function loginVerifyOtpRemote(challengeId: string, otp: string) {
+  return apiPost("/api/auth/login/verify-otp", { challengeId, otp });
 }
 
 export async function verifyMfa(userId: string, token: string) {
