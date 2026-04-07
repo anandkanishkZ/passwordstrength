@@ -38,6 +38,8 @@ const AdminPanel = () => {
   const [user, setUser] = useState<{ is_admin?: boolean } | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [usersError, setUsersError] = useState<string | null>(null);
 
   const loadUser = useCallback(async () => {
     const data = await fetchSession();
@@ -50,10 +52,15 @@ const AdminPanel = () => {
 
   const loadUsers = useCallback(async () => {
     try {
+      setUsersLoading(true);
+      setUsersError(null);
       const data = await fetchAdminUsers();
       setUsers(data.users);
     } catch (error) {
-      console.error("Failed to load users:", error);
+      const message = error instanceof Error ? error.message : "Failed to load users";
+      setUsersError(message);
+    } finally {
+      setUsersLoading(false);
     }
   }, []);
 
@@ -91,10 +98,6 @@ const AdminPanel = () => {
         <p className="text-sm text-muted-foreground">Loading admin panel…</p>
       </div>
     );
-  }
-
-  if (!user?.is_admin) {
-    return null;
   }
 
   return (
@@ -150,48 +153,63 @@ const AdminPanel = () => {
             <CardDescription>All users in the system.</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {users.map((u) => (
-                <div key={u.id} className="flex items-center justify-between rounded-lg border border-border bg-muted/30 p-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-full border border-border bg-background">
-                      <User className="h-5 w-5 text-muted-foreground" />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-foreground">{u.email}</p>
-                        {u.is_admin && (
-                          <Badge variant="secondary" className="text-xs">
-                            <ShieldCheck className="h-3 w-3 mr-1" />
-                            Admin
-                          </Badge>
-                        )}
+            {usersLoading ? (
+              <p className="text-sm text-muted-foreground">Loading users...</p>
+            ) : usersError ? (
+              <div className="space-y-3">
+                <p className="text-sm text-destructive">{usersError}</p>
+                <Button size="sm" variant="outline" onClick={loadUsers}>
+                  Retry
+                </Button>
+              </div>
+            ) : users.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No users found yet.</p>
+            ) : (
+              <div className="space-y-4">
+                {users.map((u) => (
+                  <div key={u.id} className="flex items-center justify-between rounded-lg border border-border bg-muted/30 p-4">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-10 w-10 items-center justify-center rounded-full border border-border bg-background">
+                        <User className="h-5 w-5 text-muted-foreground" />
                       </div>
-                      {u.username && (
-                        <p className="text-xs text-muted-foreground">@{u.username}</p>
-                      )}
-                      <div className="flex items-center gap-4 mt-1 text-xs text-muted-foreground">
-                        <span className="flex items-center gap-1">
-                          <Mail className="h-3 w-3" />
-                          {u.email}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Calendar className="h-3 w-3" />
-                          Joined {new Date(u.created_at).toLocaleDateString()}
-                        </span>
-                        <span className={cn(
-                          "flex items-center gap-1",
-                          u.mfa_enabled ? "text-emerald-600" : "text-amber-600"
-                        )}>
-                          <Shield className="h-3 w-3" />
-                          MFA {u.mfa_enabled ? "Enabled" : "Disabled"}
-                        </span>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-foreground">{u.email}</p>
+                          {u.is_admin && (
+                            <Badge variant="secondary" className="text-xs">
+                              <ShieldCheck className="mr-1 h-3 w-3" />
+                              Admin
+                            </Badge>
+                          )}
+                        </div>
+                        {u.username && (
+                          <p className="text-xs text-muted-foreground">@{u.username}</p>
+                        )}
+                        <div className="mt-1 flex items-center gap-4 text-xs text-muted-foreground">
+                          <span className="flex items-center gap-1">
+                            <Mail className="h-3 w-3" />
+                            {u.email}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <Calendar className="h-3 w-3" />
+                            Joined {new Date(u.created_at).toLocaleDateString()}
+                          </span>
+                          <span
+                            className={cn(
+                              "flex items-center gap-1",
+                              u.mfa_enabled ? "text-emerald-600" : "text-amber-600"
+                            )}
+                          >
+                            <Shield className="h-3 w-3" />
+                            MFA {u.mfa_enabled ? "Enabled" : "Disabled"}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
       </main>

@@ -107,6 +107,22 @@ async function migrateUsersColumns() {
   await pool.query(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
   `);
+
+  // Backfill legacy databases: ensure there is at least one admin user.
+  const adminCountResult = await pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE is_admin = TRUE;`);
+  const adminCount = Number(adminCountResult.rows[0]?.count ?? 0);
+  if (adminCount === 0) {
+    await pool.query(`
+      UPDATE users
+      SET is_admin = TRUE
+      WHERE id = (
+        SELECT id
+        FROM users
+        ORDER BY created_at ASC
+        LIMIT 1
+      );
+    `);
+  }
 }
 
 const app = express();
